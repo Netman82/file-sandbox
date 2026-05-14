@@ -1,0 +1,92 @@
+name: Download File
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL of the file to download'
+        required: true
+        type: string
+      mode:
+        description: 'Download mode'
+        required: false
+        default: 'normal'
+        type: choice
+        options:
+          - normal
+          - zip
+
+jobs:
+  download-and-save:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install aria2
+        run: sudo apt-get install -y aria2
+
+      - name: Download file
+        run: |
+          URL="${{ github.event.inputs.url }}"
+          MODE="${{ github.event.inputs.mode }}"
+          
+          echo "📥 Downloading from: $URL"
+          echo "Mode: $MODE"
+          
+          mkdir -p downloads tmp_downloads
+          
+          FILENAME=$(basename "$URL")
+          
+          aria2c \
+            --split=2 \
+            --max-connection-per-server=2 \
+            --min-split-size=90M \
+            --dir="tmp_downloads" \
+            "$URL"
+          
+          if [ "$MODE" = "zip" ]; then
+            ARCHIVE_NAME="tmp_downloads/archive_$(date +%Y%m%d_%H%M%S).zip"
+            zip -j "$ARCHIVE_NAME" tmp_downloads/*
+          fi
+          
+          # Split any file over 90MB using zip native split
+          for FILE in tmp_downloads/*; do
+            [ -f "$FILE" ] || continue
+            SIZE=$(stat -c%s "$FILE")
+            LIMIT=$((90 * 1024 * 1024))
+            BASENAME=$(basename "$FILE")
+            
+            if [ "$SIZE" -gt "$LIMIT" ]; then
+              echo "✂️ $BASENAME is $(( SIZE / 1024 / 1024 ))MB — splitting with zip..."
+              zip -0 -s 90m "downloads/${BASENAME}.zip" -j "$FILE"
+              echo "✅ Parts: $(ls downloads/${BASENAME}* | wc -l)"
+            else
+              cp "$FILE" "downloads/$BASENAME"
+            fi
+          done
+          
+          rm -rf tmp_downloads
+
+      - name: Commit & Push file
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          
+          # Add all downloaded files
+          git add downloads/
+          
+          if git diff --staged --quiet; then
+            echo "Nothing to commit"
+            exit 0
+          fi
+          
+          git commit -m "Download: ${{ github.event.inputs.url }} [skip ci]"
+          git pull --rebase origin "$BRANCH"
+          git push origin HEAD:"$BRANCH"
+          
+          echo "✅ File downloaded and pushed successfully!"
